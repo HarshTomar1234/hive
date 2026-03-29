@@ -147,7 +147,7 @@ class OutputAccumulator:
             if isinstance(value, (dict, list))
             else str(value)
         )
-        with atomic_write(spill_path / filename) as f:
+        with atomic_write(spill_path / filename, mode="w", encoding="utf-8") as f:
             f.write(write_content)
         file_size = (spill_path / filename).stat().st_size
         logger.info(

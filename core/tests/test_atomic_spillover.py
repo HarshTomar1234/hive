@@ -28,9 +28,10 @@ def _make_recording_atomic_write(record: list[Path]):
     """Return an atomic_write replacement that records paths and delegates."""
 
     @contextmanager
-    def recording_atomic_write(path: Path, mode: str = "w", encoding: str = "utf-8"):
-        record.append(Path(path))
-        with atomic_write(path, mode=mode, encoding=encoding) as f:
+    def recording_atomic_write(*args, **kwargs):
+        path = Path(args[0] if args else kwargs["path"])
+        record.append(path)
+        with atomic_write(*args, **kwargs) as f:
             yield f
 
     return recording_atomic_write
@@ -194,6 +195,67 @@ class TestRecordLearning:
 
 # ---------------------------------------------------------------------------
 # 3. types.py — OutputAccumulator._auto_spill
+# ---------------------------------------------------------------------------
+
+
+class TestEventLoopNodeSeedSpillover:
+    """EventLoopNode must write the adapt.md seed atomically."""
+
+    @pytest.mark.asyncio
+    async def test_event_loop_node_seed_uses_atomic_write(self, tmp_path, monkeypatch):
+        from framework.graph.event_loop.types import LoopConfig
+        from framework.graph.event_loop_node import EventLoopNode
+        from framework.graph.node import NodeContext, NodeSpec
+
+        record: list[Path] = []
+        monkeypatch.setattr(
+            "framework.utils.io.atomic_write",
+            _make_recording_atomic_write(record),
+        )
+
+        spillover_dir = str(tmp_path / "spill")
+        node = EventLoopNode(config=LoopConfig(spillover_dir=spillover_dir))
+
+        from unittest.mock import MagicMock
+        
+        # Create minimal NodeContext to reach the seed-writing logic
+        ctx = MagicMock()
+        ctx.node_id = "test"
+        ctx.node_spec.name = "Test"
+        ctx.node_spec.node_type = "event_loop"
+        ctx.node_spec.system_prompt = ""
+        ctx.node_spec.output_keys = []
+        ctx.is_restored_conversation = False
+        ctx.identity_prompt = ""
+        ctx.narrative = ""
+        ctx.accounts_prompt = ""
+        ctx.skills_catalog_prompt = ""
+        ctx.protocols_prompt = ""
+        ctx.is_subagent_mode = False
+        ctx.inherited_conversation = None
+        
+        # execution path accesses ctx.runtime.logger.info
+        ctx.runtime = MagicMock()
+
+        # Monkeypatch NodeConversation to abort execute() immediately after the seed is written
+        def mock_node_conversation(*args, **kwargs):
+            raise RuntimeError("Abort loop")
+        
+        monkeypatch.setattr("framework.graph.event_loop_node.NodeConversation", mock_node_conversation)
+
+        try:
+            # Depending on how the method handles initialization failures, this may bubble up
+            await node.execute(ctx)
+        except RuntimeError:
+            pass # We successfully aborted the loop after adapt.md was written
+
+        assert len(record) == 1
+        assert record[0].name == "adapt.md"
+        assert "Session Working Memory" in record[0].read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# 4. types.py — OutputAccumulator._auto_spill
 # ---------------------------------------------------------------------------
 
 
